@@ -83,6 +83,12 @@ int init_lru_maintainer(void);
 void lru_maintainer_pause(void);
 void lru_maintainer_resume(void);
 
+int start_lru_flash_thread(void *arg);
+int stop_lru_flash_thread(void);
+int init_flash_maintainer(void);
+void lru_flash_pause(void);
+void lru_flash_resume(void);
+
 void *lru_bump_buf_create(void);
 
 #ifdef EXTSTORE

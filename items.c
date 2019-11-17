@@ -31,6 +31,7 @@ static unsigned int lru_type_map[4] = {HOT_LRU, WARM_LRU, COLD_LRU, TEMP_LRU};
 typedef struct {
     uint64_t evicted;
     uint64_t evicted_nonzero;
+    uint64_t flash_evicted;
     uint64_t reclaimed;
     uint64_t outofmemory;
     uint64_t tailrepairs;
@@ -49,6 +50,8 @@ typedef struct {
     uint64_t hits_to_cold;
     uint64_t hits_to_temp;
     uint64_t mem_requested;
+    uint64_t moves_to_flash;
+    uint64_t moves_within_flash;
     rel_time_t evicted_time;
 } itemstats_t;
 
@@ -67,6 +70,12 @@ static int lru_maintainer_initialized = 0;
 static pthread_mutex_t lru_maintainer_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t cas_id_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t stats_sizes_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static volatile int do_run_lru_flash_thread = 0;
+static int lru_flash_initialized = 0;
+static pthread_mutex_t lru_flash_lock = PTHREAD_MUTEX_INITIALIZER;
+//static pthread_mutex_t cas_id_lock = PTHREAD_MUTEX_INITIALIZER;
+//static pthread_mutex_t stats_sizes_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void item_stats_reset(void) {
     int i;
@@ -701,6 +710,11 @@ void item_stats_totals(ADD_STAT add_stats, void *c) {
         APPEND_STAT("evicted_active", "%llu",
                     (unsigned long long)totals.evicted_active);
     }
+
+    if (settings.lru_flash_thread) {
+	APPEND_STAT("evicted_flash", "%llu",
+			(unsigned long long)totals.evicted_active);
+    }
     APPEND_STAT("evictions", "%llu",
                 (unsigned long long)totals.evicted);
     APPEND_STAT("reclaimed", "%llu",
@@ -722,6 +736,13 @@ void item_stats_totals(ADD_STAT add_stats, void *c) {
                     (unsigned long long)totals.direct_reclaims);
         APPEND_STAT("lru_bumps_dropped", "%llu",
                     (unsigned long long)lru_total_bumps_dropped());
+    }
+
+    if (settings.lru_flash_thread) {
+	APPEND_STAT("moves_to_flash", "%llu",
+			(unsigned long long)totals.moves_to_flash);
+	APPEND_STAT("moves_within_flash", "%llu",
+			(unsigned long long)totals.moves_within_flash);
     }
 }
 
@@ -802,7 +823,10 @@ void item_stats(ADD_STAT add_stats, void *c) {
             APPEND_NUM_FMT_STAT(fmt, n, "age_hot", "%u", age_hot);
             APPEND_NUM_FMT_STAT(fmt, n, "age_warm", "%u", age_warm);
         }
-        APPEND_NUM_FMT_STAT(fmt, n, "age", "%u", age);
+        if (settings.lru_flash_thread) {
+	    APPEND_NUM_FMT_STAT(fmt, n, "number_flash", "%u", lru_size_map[0]);
+	}
+	APPEND_NUM_FMT_STAT(fmt, n, "age", "%u", age);
         APPEND_NUM_FMT_STAT(fmt, n, "mem_requested", "%llu", (unsigned long long)totals.mem_requested);
         APPEND_NUM_FMT_STAT(fmt, n, "evicted",
                             "%llu", (unsigned long long)totals.evicted);
@@ -824,6 +848,10 @@ void item_stats(ADD_STAT add_stats, void *c) {
             APPEND_NUM_FMT_STAT(fmt, n, "evicted_active",
                                 "%llu", (unsigned long long)totals.evicted_active);
         }
+	if (settings.lru_flash_thread) {
+	    APPEND_NUM_FMT_STAT(fmt, n, "evicted flash",
+			    	"%llu", (unsigned long long)totals.flash_evicted);
+	}
         APPEND_NUM_FMT_STAT(fmt, n, "crawler_reclaimed",
                             "%llu", (unsigned long long)totals.crawler_reclaimed);
         APPEND_NUM_FMT_STAT(fmt, n, "crawler_items_checked",
@@ -852,6 +880,10 @@ void item_stats(ADD_STAT add_stats, void *c) {
                                 "%llu", (unsigned long long)totals.hits_to_temp);
 
         }
+	if (settings.lru_flash_thread) {
+	    APPEND_NUM_FMT_STAT(fmt, n, "moves_to_flash",
+			    "%llu", (unsigned long long)totals.moves_to_flash);
+	}
     }
 
     /* getting here means both ascii and binary terminators fit */
@@ -1309,6 +1341,14 @@ static bool lru_bump_async(lru_bump_buf *b, item *it, uint32_t hv) {
     return ret;
 }
 
+static bool lru_maintainer(void) {
+    bool bumped = false;
+    pthread_mutex_lock(&bump_buf_lock);
+    
+    pthread_mutex_unlock(&bump_buf_lock);
+    return bumped;
+}
+
 /* TODO: Might be worth a micro-optimization of having bump buffers link
  * themselves back into the central queue when queue goes from zero to
  * non-zero, then remove from list if zero more than N times.
@@ -1363,6 +1403,19 @@ static uint64_t lru_total_bumps_dropped(void) {
     return total;
 }
 
+static uint64_t lru_flash_bumps_dropped(void) {
+    uint64_t total = 0;
+    lru_bump_buf *b;
+    pthread_mutex_lock(&bump_buf_lock);
+    for (b = bump_buf_head; b != NULL; b=b->next) {
+	pthread_mutex_lock(&b->mutex);
+	total += b->dropped;
+	pthread_mutex_unlock(&b->mutex);
+    }
+    pthread_mutex_unlock(&bump_buf_lock);
+    return total;
+}
+
 /* Loop up to N times:
  * If too many items are in HOT_LRU, push to COLD_LRU
  * If too many items are in WARM_LRU, push to COLD_LRU
@@ -1371,6 +1424,11 @@ static uint64_t lru_total_bumps_dropped(void) {
  * locks can't handle much more than that. Leaving a TODO for how to
  * autoadjust in the future.
  */
+
+static int lru_flash_juggle(const int slabs_clsid) {
+    return 0;
+}
+
 static int lru_maintainer_juggle(const int slabs_clsid) {
     int i;
     int did_moves = 0;
@@ -1448,6 +1506,12 @@ static int lru_maintainer_juggle(const int slabs_clsid) {
  * The latter is to avoid newly started daemons from waiting too long before
  * retrying a crawl.
  */
+
+static void lru_flash_crawler_check(struct crawler_expired_data *cdata, logger *l) {
+    //int i;
+    //static rel_time_t next_crawls;
+
+}
 static void lru_maintainer_crawler_check(struct crawler_expired_data *cdata, logger *l) {
     int i;
     static rel_time_t next_crawls[POWER_LARGEST];

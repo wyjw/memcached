@@ -299,6 +299,7 @@ static void settings_init(void) {
     settings.lru_crawler_sleep = 100;
     settings.lru_crawler_tocrawl = 0;
     settings.lru_maintainer_thread = false;
+    settings.lru_flash_thread = false;
     settings.lru_segmented = true;
     settings.hot_lru_pct = 20;
     settings.warm_lru_pct = 40;
@@ -3388,6 +3389,9 @@ static void server_stats(ADD_STAT add_stats, conn *c) {
     if (settings.lru_maintainer_thread) {
         APPEND_STAT("lru_maintainer_juggles", "%llu", (unsigned long long)stats.lru_maintainer_juggles);
     }
+    if (settings.lru_flash_thread) {
+	APPEND_STAT("lru_flash_juggles", "%llu", (unsigned long long)stats.lru_flash_juggles);
+    }
     APPEND_STAT("malloc_fails", "%llu",
                 (unsigned long long)stats.malloc_fails);
     APPEND_STAT("log_worker_dropped", "%llu", (unsigned long long)stats.log_worker_dropped);
@@ -3471,6 +3475,7 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
     APPEND_STAT("dump_enabled", "%s", settings.dump_enabled ? "yes" : "no");
     APPEND_STAT("hash_algorithm", "%s", settings.hash_algorithm);
     APPEND_STAT("lru_maintainer_thread", "%s", settings.lru_maintainer_thread ? "yes" : "no");
+    APPEND_STAT("lru_flash_thread", "%s", settings.lru_flash_thread ? "yes" : "no");
     APPEND_STAT("lru_segmented", "%s", settings.lru_segmented ? "yes" : "no");
     APPEND_STAT("hot_lru_pct", "%d", settings.hot_lru_pct);
     APPEND_STAT("warm_lru_pct", "%d", settings.warm_lru_pct);
@@ -5691,7 +5696,32 @@ static void process_lru_command(conn *c, token_t *tokens, const size_t ntokens) 
             }
             out_string(c, "OK");
         }
-    } else {
+    } else if (strcmp(tokens[1].value, "mode") == 0 && ntokens >= 4 && settings.lru_flash_thread) {
+	if (strcmp(tokens[2].value, "flat") == 0) {
+	   settings.flash_segmented = false;
+	   out_string(c, "OK");
+	}
+	else if (strcmp(tokens[2].value, "segmented") == 0) {
+	   settings.flash_segmented = true;
+	   out_string(c, "OK");
+	}
+	else {
+	   out_string(c, "ERROR");
+	}
+    }
+    else if(strcmp(tokens[1].value, "temp_ttl") == 0 && ntokens >= 4 && settings.lru_flash_thread) {
+	if (!safe_strtol(tokens[2].value, &ttl)) {
+	   out_string(c, "ERROR");
+	} else {
+	   if (ttl < 0) {
+		settings.temp_lru = false;
+	   } else {
+		settings.temp_lru = true;
+		settings.temporary_ttl = ttl;
+	   }
+	}
+    }
+    else {
         out_string(c, "ERROR");
     }
 }
@@ -7634,6 +7664,7 @@ static void usage(void) {
            "   - modern:              enables options which will be default in future.\n"
            "             currently: nothing\n"
            "   - no_modern:           uses defaults of previous major version (1.4.x)\n"
+	   "   - flash_maintainer:    enable flash policy\n"
 #ifdef HAVE_DROP_PRIVILEGES
            "   - drop_privileges:     enable dropping extra syscall privileges\n"
            "   - no_drop_privileges:  disable drop_privileges in case it causes issues with\n"
@@ -8257,6 +8288,7 @@ int main (int argc, char **argv) {
     bool tcp_specified = false;
     bool udp_specified = false;
     bool start_lru_maintainer = true;
+    bool start_flash_maintainer = true;
     bool start_lru_crawler = true;
     bool start_assoc_maint = true;
     enum hashfunc_type hash_type = MURMUR3_HASH;
@@ -8290,6 +8322,7 @@ int main (int argc, char **argv) {
         LRU_CRAWLER_SLEEP,
         LRU_CRAWLER_TOCRAWL,
         LRU_MAINTAINER,
+	FLASH_MAINTAINER,
         HOT_LRU_PCT,
         WARM_LRU_PCT,
         HOT_MAX_FACTOR,
@@ -8356,6 +8389,7 @@ int main (int argc, char **argv) {
         [LRU_CRAWLER_SLEEP] = "lru_crawler_sleep",
         [LRU_CRAWLER_TOCRAWL] = "lru_crawler_tocrawl",
         [LRU_MAINTAINER] = "lru_maintainer",
+	[FLASH_MAINTAINER] = "flash_maintainer",
         [HOT_LRU_PCT] = "hot_lru_pct",
         [WARM_LRU_PCT] = "warm_lru_pct",
         [HOT_MAX_FACTOR] = "hot_max_factor",
@@ -8847,6 +8881,10 @@ int main (int argc, char **argv) {
                 start_lru_maintainer = true;
                 settings.lru_segmented = true;
                 break;
+	    case FLASH_MAINTAINER:
+		start_flash_maintainer = false;
+		settings.flash_segmented = true;
+		break;
             case HOT_LRU_PCT:
                 if (subopts_value == NULL) {
                     fprintf(stderr, "Missing hot_lru_pct argument\n");
@@ -9321,6 +9359,11 @@ int main (int argc, char **argv) {
         exit(EX_USAGE);
     }
 
+    //TODO: We need to check this
+    if (settings.temp_lru && !start_flash_maintainer) {
+	fprintf(stderr, "temporary_ttl requires lru_maintainer to be enabled\n");
+	exit(EX_USAGE);
+    }
     if (hash_init(hash_type) != 0) {
         fprintf(stderr, "Failed to initialize hash_algorithm!\n");
         exit(EX_USAGE);

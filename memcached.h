@@ -335,6 +335,7 @@ struct stats {
     uint64_t      slab_reassign_busy_deletes; /* refcounted items killed */
     uint64_t      lru_crawler_starts; /* Number of item crawlers kicked off */
     uint64_t      lru_maintainer_juggles; /* number of LRU bg pokes */
+    uint64_t	  lru_flash_juggles;
     uint64_t      time_in_listen_disabled_us;  /* elapsed time in microseconds while server unable to process new connections */
     uint64_t      log_worker_dropped; /* logs dropped by worker threads */
     uint64_t      log_worker_written; /* logs written by worker threads */
@@ -404,7 +405,9 @@ struct settings {
     bool maxconns_fast;     /* Whether or not to early close connections */
     bool lru_crawler;        /* Whether or not to enable the autocrawler thread */
     bool lru_maintainer_thread; /* LRU maintainer background thread */
+    bool lru_flash_thread;
     bool lru_segmented;     /* Use split or flat LRU's */
+    bool flash_segmented;
     bool slab_reassign;     /* Whether or not slab reassignment is allowed */
     int slab_automove;     /* Whether or not to automatically move slabs */
     double slab_automove_ratio; /* youngest must be within pct of oldest */
