@@ -6,6 +6,7 @@
 #include "storage.h"
 #include "slab_automove_extstore.h"
 #endif
+#include "simu.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
@@ -505,6 +506,7 @@ int do_item_link(item *it, const uint32_t hv) {
     /* Allocate a new CAS ID on link. */
     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
     assoc_insert(it, hv);
+    alloc_simu(it, hash(ITEM_key(it), it->nkey));
     item_link_q(it);
     refcount_incr(it);
     item_stats_sizes_add(it);
