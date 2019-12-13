@@ -4,11 +4,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-lru* 
+lru*
 lru_init(const uint64_t maxbytes, const unsigned int hashpower)
 {
     lru *l = calloc(sizeof(lru), 1);
-    
+
     if (l == NULL) {
         fprintf(stderr, "lru init alloc lru failed.\n");
         return NULL;
@@ -34,7 +34,7 @@ lru_init(const uint64_t maxbytes, const unsigned int hashpower)
     return l;
 }
 
-static uint32_t 
+static uint32_t
 hash(const char *key, const int nkey)
 {
   const char *p;
@@ -55,10 +55,10 @@ do_item_get(lru *l, const char *key, const size_t nkey, const uint32_t hv)
 }
 
 static void
-do_item_remove_hv(lru *l, lru_item *it, const uint32_t hv) 
+do_item_remove_hv(lru *l, lru_item *it, const uint32_t hv)
 {
     assert(it != NULL);
-    hash_delete(l, ITEM_key(it), it->nkey, hv);
+    hash_delete(l, LRU_ITEM_key(it), it->nkey, hv);
     if (l->head == it) {
         assert(it->prev == 0);
         l->head = it->next;
@@ -83,26 +83,26 @@ do_item_remove_hv(lru *l, lru_item *it, const uint32_t hv)
 static void
 do_item_remove(lru *l, lru_item *it)
 {
-    uint32_t hv = hash(ITEM_key(it), it->nkey);
+    uint32_t hv = hash(LRU_ITEM_key(it), it->nkey);
     do_item_remove_hv(l, it, hv);
 }
 
 int
-item_get(lru *l, const char *key, const size_t nkey, char *buf, const size_t nbuf, size_t *nvalue)
+lru_item_get(lru *l, const char *key, const size_t nkey, char *buf, const size_t nbuf, size_t *nvalue)
 {
     l->stat.get_cmds++;
     uint32_t hv = hash(key, nkey);
     lru_item *it = do_item_get(l, key, nkey, hv);
     if (it != NULL) {
         l->stat.get_hits ++;
-        size_t vlen = it->nbytes - ITEM_size - it->nkey - 1;
+        size_t vlen = it->nbytes - LRU_ITEM_size - it->nkey - 1;
 
         if (nvalue) {
             *nvalue = vlen;
         }
 
         if (buf && nbuf) {
-            void *data = ITEM_data(it);
+            void *data = LRU_ITEM_data(it);
             memcpy(buf, data, MIN(nbuf, vlen));
         }
         return 0;
@@ -112,12 +112,12 @@ item_get(lru *l, const char *key, const size_t nkey, char *buf, const size_t nbu
 }
 
 static void*
-item_alloc(lru *l, const size_t sz, lru_item *old)
+lru_item_alloc(lru *l, const size_t sz, lru_item *old)
 {
     void *m = NULL;
     int delta = old ? old->nbytes : 0;
     if ((l->stat.curr_bytes + sz - delta) <= l->max_bytes) {
-        
+
         m = malloc(sz);
         if (!m) {
             l->stat.malloc_failed += 1;
@@ -128,7 +128,7 @@ item_alloc(lru *l, const size_t sz, lru_item *old)
         return NULL;
 
     } else {
-        //evict 
+        //evict
         assert(l->tail != NULL);
         lru_item *it = l->tail;
         while((it != NULL) && (l->stat.curr_bytes + sz - delta) > l->max_bytes) {
@@ -155,16 +155,16 @@ item_alloc(lru *l, const size_t sz, lru_item *old)
     return m;
 }
 
-int 
-item_set(lru *l, const char *key, const size_t nkey, const char *value, const size_t nvalue)
+int
+lru_item_set(lru *l, const char *key, const size_t nkey, const char *value, const size_t nvalue)
 {
     l->stat.set_cmds ++;
 
     uint32_t hv = hash(key, nkey);
     lru_item *old = do_item_get(l, key, nkey, hv);
 
-    size_t isize = ITEM_size + nkey + 1 + nvalue;
-    lru_item *it = item_alloc(l, isize, old);
+    size_t isize = LRU_ITEM_size + nkey + 1 + nvalue;
+    lru_item *it = lru_item_alloc(l, isize, old);
     if (it == NULL) {
         l->stat.set_failed ++;
         return 1;
@@ -177,9 +177,9 @@ item_set(lru *l, const char *key, const size_t nkey, const char *value, const si
     it->nkey = nkey;
     it->nbytes = isize;
 
-    memcpy(ITEM_key(it), key, nkey);
-    memcpy(ITEM_data(it), value, nvalue);
-    
+    memcpy(LRU_ITEM_key(it), key, nkey);
+    memcpy(LRU_ITEM_data(it), value, nvalue);
+
     hash_insert(l, it, hv);
     it->prev = 0;
     it->next = l->head;
@@ -189,8 +189,8 @@ item_set(lru *l, const char *key, const size_t nkey, const char *value, const si
     return 0;
 }
 
-int 
-item_delete(lru *l, const char *key, const size_t nkey)
+int
+lru_item_delete(lru *l, const char *key, const size_t nkey)
 {
     l->stat.del_cmds++;
     uint32_t hv = hash(key, nkey);
@@ -206,7 +206,7 @@ item_delete(lru *l, const char *key, const size_t nkey)
     }
 }
 
-static void 
+static void
 append_stat(char **buf, int *nbuf, char *name, const char *fmt, ...)
 {
 
@@ -226,8 +226,8 @@ append_stat(char **buf, int *nbuf, char *name, const char *fmt, ...)
     *buf += len;
 }
 
-void 
-stat_print(lru *l, char *buf, const int nbuf)
+void
+lru_stat_print(lru *l, char *buf, const int nbuf)
 {
     int remaining = nbuf;
 
@@ -259,7 +259,7 @@ stat_print(lru *l, char *buf, const int nbuf)
     append_stat(&buf, &remaining, "evictions","%llu", l->stat.evictions);
 }
 
-void 
+void
 lru_free(lru *l)
 {
     //free items

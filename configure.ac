@@ -4,9 +4,9 @@ m4_include([m4/c99-backport.m4])
 AC_INIT([memcached], [VERSION_NUMBER], [memcached@googlegroups.com])
 AC_CANONICAL_HOST
 AC_CONFIG_SRCDIR([memcached.c])
-AM_INIT_AUTOMAKE([foreign])
+AM_INIT_AUTOMAKE([foreign subdir-objects])
 AM_CONFIG_HEADER([config.h])
-
+#AM_INIT_AUTOMAKE([subdir-objects])
 AC_PROG_CC
 
 dnl **********************************************************************

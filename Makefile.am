@@ -2,6 +2,8 @@ bin_PROGRAMS = memcached
 pkginclude_HEADERS = protocol_binary.h
 noinst_PROGRAMS = memcached-debug sizes testapp timedrun
 
+#vpath %.cpp $(SRC_DIR)
+
 BUILT_SOURCES=
 
 testapp_SOURCES = testapp.c util.c util.h
@@ -25,7 +27,10 @@ memcached_SOURCES = memcached.c memcached.h \
                     itoa_ljust.c itoa_ljust.h \
                     slab_automove.c slab_automove.h \
                     authfile.c authfile.h \
-                    restart.c restart.h
+                    restart.c restart.h \
+		    extension/simu.c extension/simu.h \
+		    extension/lru.c extension/lru.h \
+		    extension/hash.h extension/hash.c
 
 if BUILD_CACHE
 memcached_SOURCES += cache.c
@@ -67,6 +72,7 @@ memcached_debug_SOURCES = $(memcached_SOURCES)
 memcached_CPPFLAGS = -DNDEBUG
 memcached_debug_LDADD = @PROFILER_LDFLAGS@
 memcached_debug_CFLAGS = @PROFILER_FLAGS@
+memcached_debug_CFLAGS += -fsanitize=address
 
 memcached_LDADD =
 memcached_DEPENDENCIES =
