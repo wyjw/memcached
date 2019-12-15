@@ -7,7 +7,7 @@ static pthread_mutex_t simu_maintainer_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t nonEmpty = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t count_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define MAX 100000
+static int MAX = 100000;
 #define BUFLEN 50000
 #define NUMTHREAD 3
 #define MAX_SIMU_MAINTAINER_SLEEP 300
@@ -23,6 +23,7 @@ static pthread_t simu_maintainer_tid;
 static pthread_t simu_consumer_tid;
 static void *simu_maintainer_thread(void *arg);
 static int to_sleep = 1;
+static int sample_size = 10000;
 
 void would_hit(lru *l, lru_item *it, lru_stats *stats);
 /*
@@ -97,7 +98,6 @@ int stop_simu_maintainer_thread(void)
 void *start_simu_maintainer_thread()
 {
    printf("Created simu maintainer thread.\n");
-   char *w;
 
    //int malloc = ITEM_SIZE + nkey + nvalue + 1;
    //par = arg->experiment_parameters;
@@ -107,10 +107,12 @@ void *start_simu_maintainer_thread()
    lru *dram_l;
    datum->open = malloc(sizeof(open_policy));
    int MAX_SIZE = 256 * 1024 * 1024;
+   int DRAM_MAX_SIZE = MAX_SIZE / 5;
    datum->open->global_lru = lru_init(MAX_SIZE, 0);
-   datum->open->dram_lru = lru_init(MAX_SIZE, 0);
+   datum->open->dram_lru = lru_init(DRAM_MAX_SIZE, 0);
    //arg->open->global_lfu = lru_init(malloc, 0);
    //arg->open->dram_lfu = lru_init(malloc, 0);
+   datum->open->features = malloc(sizeof(lru_item) * sample_size);
 
    latencies *l = malloc(sizeof(latencies));
    l->flash_write = 0.0002;
@@ -222,8 +224,10 @@ void *do_calculation(simu_data *datum, request *buf, int sizeofbuf)
   for (int i = 0; i < sizeofbuf; i++)
   {
     request _r = buf[i];
-    would_hit(datum->open->global_lru, _r.it, datum->stats);
+    //would_hit(datum->open->global_lru, _r.it, datum->stats);
+    would_hit(datum, _r.it, datum->stats);
   }
+  print_stats(datum->stats);
   printf("Final stats during our simu are: %d,%d\n", datum->stats->hits, datum->stats->operations);
 }
 
@@ -264,21 +268,77 @@ static void *simu_maintainer_thread(void *arg)
   }
 }
 
-void would_hit(lru *l, lru_item *it, lru_stats *lstats) {
+void would_hit(simu_data *datum, lru_item *it, lru_stats *lstats) {
    //key = ITEM_KEY(it);
+   l = datum->open->global_lru;
+   ld = datum->open->dram_lru;
    lstats->operations++;
    size_t sz;
-   if (lru_item_get(l, LRU_ITEM_key(it), it->nkey, LRU_ITEM_data(it), STAT_KEY_LEN, &sz) != 0)
+   if (lru_item_get(ld, LRU_ITEM_key(it), it->nkey, LRU_ITEM_data(it), STAT_KEY_LEN, &sz) != 0)
    {
-     lru_item_set(l, LRU_ITEM_key(it), it->nkey, LRU_ITEM_data(it), it->nbytes - 1);
+     if (!lru_item_set(ld, LRU_ITEM_key(it), it->nkey, LRU_ITEM_data(it), it->nbytes - 1))
+     {
+	lru_item_remove(ld, );
+	lru_item_add(ld, );
+	if (lru_item_get(l, LRU_ITEM_key(it), it->nkey, LRU_ITEM_data(it), STAT_KEY_LEN, &sz) != 0)
+	{
+          lru_item_set(l, LRU_ITEM_key(it), it->nkey, LRU_ITEM_data(it), STAT_KEY_LEN, &sz);
+	}
+	else {
+	  lstats->flash_hits++;
+	  //lru_item_get(l, LRU_ITEM_key(it), it->nkey, LRU_ITEM_data(it), STAT_KEY_LEN, &sz);
+	}
+     }
    }
    else
    {
-     lstats->hits++;
+     lstats->dram_hits++;
+     //lstats->flash_hits++;
    }
-   printf("WE HAVE %d operations and %d hits\n", lstats->operations, lstats->hits);
+   //printf("WE HAVE %d operations and %d hits\n", lstats->operations, lstats->hits);
    //if (lstats->operations % 1000 == 0)
    //{
    // printf("WE HAVE %d operations and %d hits\n", lstats->operations, lstats->hits);
    //}
+}
+
+void print_stats(lru_stats *stats) {
+
+}
+
+void would_hit(simu_data *datum, lru_item *it, lru_stats *lstats)
+{
+   srand(time(NULL));
+   lru_item * ff = datum->open->features;
+   int count = datum->count;
+   int k = sample_size;
+   if (count < k)
+   {
+     ff[count] = it;
+   }
+   if (count >= k)
+   {
+     k = rand() % count;
+     ff[k] = it;
+   }
+   /*
+   for (int i = 0; i < k; i++) {
+     ff[count] = ;
+   }
+   */
+}
+
+void calc_inv(simu_data *datum, lru_item *it, lru_stats *lstats, )
+{
+   srand(time(NULL));
+   int count = datum->count;
+   int k = sample_size;
+   if (count < k)
+   {
+     ff[count] = it;
+   }
+   if (count >= k)
+   {
+     
+   }
 }

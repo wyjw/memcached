@@ -72,7 +72,7 @@ memcached_debug_SOURCES = $(memcached_SOURCES)
 memcached_CPPFLAGS = -DNDEBUG
 memcached_debug_LDADD = @PROFILER_LDFLAGS@
 memcached_debug_CFLAGS = @PROFILER_FLAGS@
-memcached_debug_CFLAGS += -fsanitize=address
+#memcached_debug_CFLAGS += -fsanitize=address
 
 memcached_LDADD =
 memcached_DEPENDENCIES =

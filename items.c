@@ -1,4 +1,5 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+
 #include "memcached.h"
 #include "bipbuffer.h"
 #include "slab_automove.h"
@@ -6,7 +7,7 @@
 #include "storage.h"
 #include "slab_automove_extstore.h"
 #endif
-#include "simu.h"
+#include "extension/simu.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
@@ -29,6 +30,12 @@ static void item_unlink_q(item *it);
 static unsigned int lru_type_map[4] = {HOT_LRU, WARM_LRU, COLD_LRU, TEMP_LRU};
 
 #define LARGEST_ID POWER_LARGEST
+
+// current how_many
+#define RANDOM_COUNT 100000
+static unsigned int current_it[LARGEST_ID];
+#define NUM_TO_SAMPLE 10
+
 typedef struct {
     uint64_t evicted;
     uint64_t evicted_nonzero;
@@ -58,6 +65,8 @@ typedef struct {
 
 static item *heads[LARGEST_ID];
 static item *tails[LARGEST_ID];
+// extension implementation
+static item *vals[LARGEST_ID][RANDOM_COUNT];
 static itemstats_t itemstats[LARGEST_ID];
 static unsigned int sizes[LARGEST_ID];
 static uint64_t sizes_bytes[LARGEST_ID];
@@ -77,6 +86,7 @@ static int lru_flash_initialized = 0;
 static pthread_mutex_t lru_flash_lock = PTHREAD_MUTEX_INITIALIZER;
 //static pthread_mutex_t cas_id_lock = PTHREAD_MUTEX_INITIALIZER;
 //static pthread_mutex_t stats_sizes_lock = PTHREAD_MUTEX_INITIALIZER;
+void add_to_random_queue(item *it);
 
 void item_stats_reset(void) {
     int i;
@@ -335,6 +345,10 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
     it->nbytes = nbytes;
     memcpy(ITEM_key(it), key, nkey);
     it->exptime = exptime;
+
+    // initialize the extstore pull
+    it->hit_count = 0;
+    it->been_cold = 0;
     if (nsuffix > 0) {
         memcpy(ITEM_suffix(it), &flags, sizeof(flags));
     }
@@ -397,6 +411,8 @@ void do_item_link_fixup(item *it) {
 
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
+    add_to_random_queue(it);
+
     if (it->prev == 0 && *head == 0) *head = it;
     if (it->next == 0 && *tail == 0) *tail = it;
     sizes[it->slabs_clsid]++;
@@ -413,12 +429,32 @@ void do_item_link_fixup(item *it) {
     return;
 }
 
+// This is kind of an approximation to LFU
+void add_to_random_queue(item *it)
+{
+  srand(time(NULL));
+  int slabid = it->slabs_clsid;
+  if (current_it[slabid] < RANDOM_COUNT){
+    //printf("GOT HERE with val %d and slabid %d\n", current_it[slabid], slabid);
+    vals[slabid][current_it[slabid]] = it;
+    current_it[slabid]++;
+  }
+  else
+  {
+    int randint = rand() % (RANDOM_COUNT-1);
+    //printf("kicked out %s and replaced with %s\n", ITEM_key(vals[it->slabs_clsid][randint]), ITEM_key(it));
+    vals[it->slabs_clsid][randint] = it;
+  }
+}
+
 static void do_item_link_q(item *it) { /* item is the new head */
     item **head, **tail;
     assert((it->it_flags & ITEM_SLABBED) == 0);
 
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
+    add_to_random_queue(it);
+
     assert(it != *head);
     assert((*head && *tail) || (*head == 0 && *tail == 0));
     it->prev = 0;
@@ -457,6 +493,7 @@ static void do_item_unlink_q(item *it) {
     item **head, **tail;
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
+    add_to_random_queue(it);
 
     if (*head == it) {
         assert(it->prev == 0);
@@ -506,7 +543,7 @@ int do_item_link(item *it, const uint32_t hv) {
     /* Allocate a new CAS ID on link. */
     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
     assoc_insert(it, hv);
-    alloc_simu(it, hash(ITEM_key(it), it->nkey));
+    //registerAlloc(it, hash(ITEM_key(it), it->nkey));
     item_link_q(it);
     refcount_incr(it);
     item_stats_sizes_add(it);
@@ -570,8 +607,14 @@ void do_item_update(item *it) {
                 it->slabs_clsid |= WARM_LRU;
                 it->it_flags &= ~ITEM_ACTIVE;
                 item_link_q_warm(it);
+                if (it->time < current_time - ITEM_UPDATE_INTERVAL)
+                {
+                  it->hit_count++;
+                }
+                it->been_cold++;
             } else {
                 it->time = current_time;
+
             }
         }
     } else if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
@@ -1288,6 +1331,215 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
 }
 
 
+/* Returns number of items remove, expired, or evicted.
+ * Callable from worker threads or the LRU maintainer thread */
+int ext_pull_tail(const int orig_id, const int cur_lru,
+        const uint64_t total_bytes, const uint8_t flags, const rel_time_t max_age,
+        struct lru_pull_tail_return *ret_it) {
+    item *it = NULL;
+    int id = orig_id;
+    int removed = 0;
+    if (id == 0)
+        return 0;
+
+    int tries = 5;
+    item *search;
+    item *next_it;
+    void *hold_lock = NULL;
+    unsigned int move_to_lru = 0;
+    uint64_t limit = 0;
+    int least_so_far = 1000000;
+
+    id |= cur_lru;
+    pthread_mutex_lock(&lru_locks[id]);
+    search = tails[id];
+    if (tails[id] != NULL)
+    {
+      least_so_far = tails[id]->hit_count;
+    }
+    for (int i = 0; i < current_it; i++)
+    {
+      srand(time(NULL));
+      for (int j = 0; j < NUM_TO_SAMPLE; j++){
+        int k = 0;
+        if (current_it[id] != 0)
+        {
+          k = rand() % current_it[id];
+        }
+        else {
+          return 0;
+        }
+        printf("K is %d and current_it is %d\n", k, current_it[id]);
+        printf("id is %d and k is %d\n", id, k);
+        printf("WE HAVE string %s\n", ITEM_key(vals[id][k]));
+        if (vals[id][k]->hit_count < least_so_far)
+        {
+          least_so_far = vals[id][k]->hit_count;
+          search = vals[id][k];
+        }
+      }
+    }
+
+    /* We walk up *only* for locked items, and if bottom is expired. */
+    for (; tries > 0 && search != NULL; tries--, search=next_it) {
+        /* we might relink search mid-loop, so search->prev isn't reliable */
+        next_it = search->prev;
+        if (search->nbytes == 0 && search->nkey == 0 && search->it_flags == 1) {
+            /* We are a crawler, ignore it. */
+            if (flags & LRU_PULL_CRAWL_BLOCKS) {
+                pthread_mutex_unlock(&lru_locks[id]);
+                return 0;
+            }
+            tries++;
+            continue;
+        }
+        uint32_t hv = hash(ITEM_key(search), search->nkey);
+        /* Attempt to hash item lock the "search" item. If locked, no
+         * other callers can incr the refcount. Also skip ourselves. */
+        if ((hold_lock = item_trylock(hv)) == NULL)
+            continue;
+        /* Now see if the item is refcount locked */
+        if (refcount_incr(search) != 2) {
+            /* Note pathological case with ref'ed items in tail.
+             * Can still unlink the item, but it won't be reusable yet */
+            itemstats[id].lrutail_reflocked++;
+            /* In case of refcount leaks, enable for quick workaround. */
+            /* WARNING: This can cause terrible corruption */
+            if (settings.tail_repair_time &&
+                    search->time + settings.tail_repair_time < current_time) {
+                itemstats[id].tailrepairs++;
+                search->refcount = 1;
+                /* This will call item_remove -> item_free since refcnt is 1 */
+                STORAGE_delete(ext_storage, search);
+                do_item_unlink_nolock(search, hv);
+                item_trylock_unlock(hold_lock);
+                continue;
+            }
+        }
+
+        /* Expired or flushed */
+        if ((search->exptime != 0 && search->exptime < current_time)
+            || item_is_flushed(search)) {
+            itemstats[id].reclaimed++;
+            if ((search->it_flags & ITEM_FETCHED) == 0) {
+                itemstats[id].expired_unfetched++;
+            }
+            /* refcnt 2 -> 1 */
+            do_item_unlink_nolock(search, hv);
+            STORAGE_delete(ext_storage, search);
+            /* refcnt 1 -> 0 -> item_free */
+            do_item_remove(search);
+            item_trylock_unlock(hold_lock);
+            removed++;
+
+            /* If all we're finding are expired, can keep going */
+            continue;
+        }
+
+        /* If we're HOT_LRU or WARM_LRU and over size limit, send to COLD_LRU.
+         * If we're COLD_LRU, send to WARM_LRU unless we need to evict
+         */
+        switch (cur_lru) {
+            case HOT_LRU:
+                limit = total_bytes * settings.hot_lru_pct / 100;
+                /*
+                if (limit == 0)
+                    limit = total_bytes * settings.warm_lru_pct / 100;
+                // Rescue ACTIVE items aggressively
+                if ((search->it_flags & ITEM_ACTIVE) != 0) {
+                    search->it_flags &= ~ITEM_ACTIVE;
+                    removed++;
+                    if (cur_lru == WARM_LRU) {
+                        itemstats[id].moves_within_lru++;
+                        do_item_unlink_q(search);
+                        do_item_link_q(search);
+                        do_item_remove(search);
+                        item_trylock_unlock(hold_lock);
+                    } else {
+                        // Active HOT_LRU items flow to WARM
+                        itemstats[id].moves_to_warm++;
+                        move_to_lru = WARM_LRU;
+                        do_item_unlink_q(search);
+                        it = search;
+                    }
+                } else if (sizes_bytes[id] > limit ||
+                           current_time - search->time > max_age) {
+                    itemstats[id].moves_to_cold++;
+                    move_to_lru = COLD_LRU;
+                    do_item_unlink_q(search);
+                    it = search;
+                    removed++;
+                    break;
+                } else {
+                    // Don't want to move to COLD, not active, bail out
+                    it = search;
+                }
+                break;
+                */
+            case WARM_LRU:
+            case COLD_LRU:
+                it = search; /* No matter what, we're stopping */
+                if (flags & LRU_PULL_EVICT) {
+                    if (settings.evict_to_free == 0) {
+                        /* Don't think we need a counter for this. It'll OOM.  */
+                        break;
+                    }
+                    itemstats[id].evicted++;
+                    itemstats[id].evicted_time = current_time - search->time;
+                    if (search->exptime != 0)
+                        itemstats[id].evicted_nonzero++;
+                    if ((search->it_flags & ITEM_FETCHED) == 0) {
+                        itemstats[id].evicted_unfetched++;
+                    }
+                    if ((search->it_flags & ITEM_ACTIVE)) {
+                        itemstats[id].evicted_active++;
+                    }
+                    LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, search);
+                    STORAGE_delete(ext_storage, search);
+                    do_item_unlink_nolock(search, hv);
+                    removed++;
+                    if (settings.slab_automove == 2) {
+                        slabs_reassign(-1, orig_id);
+                    }
+                } else if (flags & LRU_PULL_RETURN_ITEM) {
+                    /* Keep a reference to this item and return it. */
+                    ret_it->it = it;
+                    ret_it->hv = hv;
+                } else if ((search->it_flags & ITEM_ACTIVE) != 0
+                        && settings.lru_segmented) {
+                    itemstats[id].moves_to_warm++;
+                    search->it_flags &= ~ITEM_ACTIVE;
+                    move_to_lru = WARM_LRU;
+                    do_item_unlink_q(search);
+                    removed++;
+                }
+                break;
+            case TEMP_LRU:
+                it = search; /* Kill the loop. Parent only interested in reclaims */
+                break;
+        }
+        if (it != NULL)
+            break;
+    }
+
+    pthread_mutex_unlock(&lru_locks[id]);
+
+    if (it != NULL) {
+        if (move_to_lru) {
+            it->slabs_clsid = ITEM_clsid(it);
+            it->slabs_clsid |= move_to_lru;
+            item_link_q(it);
+        }
+        if ((flags & LRU_PULL_RETURN_ITEM) == 0) {
+            do_item_remove(it);
+            item_trylock_unlock(hold_lock);
+        }
+    }
+
+    return removed;
+}
+
+
 /* TODO: Third place this code needs to be deduped */
 static void lru_bump_buf_link_q(lru_bump_buf *b) {
     pthread_mutex_lock(&bump_buf_lock);
@@ -1346,7 +1598,7 @@ static bool lru_bump_async(lru_bump_buf *b, item *it, uint32_t hv) {
 static bool lru_maintainer(void) {
     bool bumped = false;
     pthread_mutex_lock(&bump_buf_lock);
-    
+
     pthread_mutex_unlock(&bump_buf_lock);
     return bumped;
 }

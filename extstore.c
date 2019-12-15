@@ -16,7 +16,7 @@
 #include <string.h>
 #include <assert.h>
 #include "extstore.h"
-
+#define EXSTORE_DEBUG
 // TODO: better if an init option turns this on/off.
 #ifdef EXTSTORE_DEBUG
 #define E_DEBUG(...) \

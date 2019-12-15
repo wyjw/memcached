@@ -72,7 +72,7 @@ static enum test_return lru_big_set_test(void) {
     char *key = "key1";
     char *value = "value1";
 
-    int malloc = ITEM_size + strlen(key) + 1 + strlen(value) + 1; 
+    int malloc = ITEM_size + strlen(key) + 1 + strlen(value) + 1;
 
     enum test_return r = lru_normal_op(NULL, malloc, key, strlen(key), value, strlen(value) + 1);
 
@@ -96,7 +96,7 @@ static enum test_return lru_evict_test(void) {
     size_t nkey = 4;
     size_t nvalue = strlen(value);
 
-    int malloc = ITEM_size + nkey + nvalue + 1; 
+    int malloc = ITEM_size + nkey + nvalue + 1;
     int r, i = 0, loop;
     lru *l;
 
@@ -156,7 +156,7 @@ static enum test_return lru_evict_test(void) {
     memset(buf, 0, sizeof(buf));
 
     lru_free(l);
-    
+
     return TEST_PASS;
 }
 

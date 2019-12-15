@@ -20,7 +20,8 @@ static int storage_write(void *storage, const int clsid, const int item_age) {
     struct lru_pull_tail_return it_info;
 
     it_info.it = NULL;
-    lru_pull_tail(clsid, COLD_LRU, 0, LRU_PULL_RETURN_ITEM, 0, &it_info);
+    printf("Looking at %d\n", clsid);
+    ext_pull_tail(clsid, COLD_LRU, 0, LRU_PULL_RETURN_ITEM, 0, &it_info);
     /* Item is locked, and we have a reference to it. */
     if (it_info.it == NULL) {
         return did_moves;

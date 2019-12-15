@@ -29,6 +29,9 @@
 #include <ctype.h>
 #include <stdarg.h>
 
+// extension
+#include "extension/simu.h"
+
 /* some POSIX systems need the following definition
  * to get mlockall flags out of sys/mman.h.  */
 #ifndef _P1003_1B_VISIBLE
@@ -3008,6 +3011,11 @@ static int _store_item_copy_data(int comm, item *old_it, item *new_it, item *add
 enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t hv) {
     char *key = ITEM_key(it);
     item *old_it = do_item_get(key, it->nkey, hv, c, DONT_UPDATE);
+    uint32_t hash_val = hash(ITEM_key(it), it->nkey);
+    /*if (hash_val % 1000 == 5) {
+      registerAlloc(it, hash_val);
+    }*/
+    registerAlloc(it, hash_val);
     enum store_item_type stored = NOT_STORED;
 
     item *new_it = NULL;
@@ -9695,6 +9703,8 @@ int main (int argc, char **argv) {
         fprintf(stderr, "Failed to enable LRU maintainer thread\n");
         return 1;
     }
+
+    start_simu_maintainer_thread();
 
     if (settings.slab_reassign &&
         start_slab_maintenance_thread() == -1) {

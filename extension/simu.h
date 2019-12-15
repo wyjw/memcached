@@ -9,6 +9,8 @@ typedef struct
 #include "extension/lru.h"
 #include "extension/lfu.h"
 
+//static int sample_size = 10000;
+
 typedef struct
 {
   double flash_write;
@@ -37,6 +39,9 @@ typedef struct
   lru *global_lru; // global lru
   lfu *dram_lfu; // dram lfu
   lfu *global_lfu; //global_lfu
+  lru_item (*features)[];
+  int count = 0;
+  int sample_size = 10000;
 } open_policy;
 
 typedef struct
